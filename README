@@ -32,11 +32,17 @@ SETUP
 
 RUN
 ---
-1. Start Ceph processes with LTTng LD_PRELOAD option. Example:
+1. Ensure following config parameters are enabled for capturing traces. NOTE: do not enable debug_eventtrace unless
+   you are using Ceph log file as your source to explore data path flow. For latency analysis, turn this off.
+   [global]
+   debug_eventtrace = 0/0
+   event_tracing = true
+
+2. Start Ceph processes with LTTng LD_PRELOAD option. Example:
 
    LD_PRELOAD=/usr/lib/x86_64-linux-gnu/liblttng-ust-fork.so ceph-osd --cluster=ceph -i 0 --conf /etc/ceph/ceph.conf
 
-2. Start LTTng session with right context params. Scripts expect pthread_id, vpid, procname fields in the traces. 
+3. Start LTTng session with right context params. Scripts expect pthread_id, vpid, procname fields in the traces. 
 
     lttng enable-channel --userspace --num-subbuf 16 --subbuf-size 16M big-channel
     lttng add-context -u --channel=big-channel -t pthread_id
@@ -45,18 +51,18 @@ RUN
     lttng enable-event --userspace --channel=big-channel eventtrace:*
     lttng start <run id>
 
-3. Run your favorite benchmarking tool (rados, fio etc.). This needs to have LTTng turned on as well, example:
+4. Run your favorite benchmarking tool (rados, fio etc.). This needs to have LTTng turned on as well, example:
 
    LD_PRELOAD=/usr/lib/x86_64-linux-gnu/liblttng-ust-fork.so rados bench -p $POOL -t $qdepth $RADOS_RUN_TIME rand --run-name $run_name
 
-4. Stop and dump LTTng traces
+5. Stop and dump LTTng traces
 
    lttng stop <run id>
    lttng view <run id> > foo.trace
    lttng disable-channel  --userspace big-channel
    lttng destroy <run id>
 
-5. Run script to collect latency stats
+6. Run script to collect latency stats
 
    a. Function tracing. Trace output in <file>.perf.csv
       python parse.py -t func <file list>  
