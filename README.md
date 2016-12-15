@@ -93,29 +93,40 @@ TIPS
    Use this to understand Ceph code flows very quikcly. You can use very simple script (shown below) to add traces:
 
     dir=/root/cepht1
-    src_dir=$dir/src
 
-    ################## DO NOT CHANGE BELOW THIS LINE ###############
+    src_dir=$dir/src
 
     function patch_trace_calls {
         file=$1
+
         echo "Processing $file"
+
         sed -i '/#define.*dout_subsys/a \
+
     #include "common/EventTrace.h"' $file
+
         sed -i 's#^{$#{\n  FUNCTRACE\(\);#' $file
+
     }
 
     for file in $(ls -1 ~/cepht1/src/os/bluestore/*.cc); do
+
         patch_trace_calls $file
+
     done
     
     NOTE: You will see compilation errors when function entry i.e. { is not on its own line or conflicts with keyworkds like 
       namespace that above script will not recognize. You are expected to manually fix them. Here is how instrumented fucntion
       looks:
+
     void BlueFS::wait_for_aio(FileWriter *h)
+
     {
+
       FUNCTRACE();
+
       ...
+
     }
 
 2. Input for OID event tracing comes from counters.yaml file. You can add arbitrary OID events in the source code - needs 
@@ -127,7 +138,10 @@ TIPS
 
    Associated entry in yaml shown below which tracks end to end latency of rados read operation:
    rados_read_e2e:
+
     key: '{oid}!{context}!{vpid}'
+
     begin: RADOS_OP_COMPLETE
+
     end: RADOS_READ_OP_BEGIN
 
