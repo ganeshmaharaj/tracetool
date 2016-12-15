@@ -92,6 +92,7 @@ TIPS
 1. Ceph repo has traces only for key functions. You can instrument any function to get visibility into how the flow works. 
    Use this to understand Ceph code flows very quikcly. You can use very simple script (shown below) to add traces:
 
+
     dir=/root/cepht1
 
     src_dir=$dir/src
@@ -115,6 +116,8 @@ TIPS
 
     done
     
+
+
     NOTE: You will see compilation errors when function entry i.e. { is not on its own line or conflicts with keyworkds like 
       namespace that above script will not recognize. You are expected to manually fix them. Here is how instrumented fucntion
       looks:
