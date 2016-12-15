@@ -129,8 +129,10 @@ TIPS
 
     }
 
+
 2. Input for OID event tracing comes from counters.yaml file. You can add arbitrary OID events in the source code - needs 
    oid name (or any arbitrray string) and an event id (arbitrary string).
+
 
    OID_EVENT_TRACE(oid.name.c_str(), "RADOS_READ_OP_BEGIN");
 
