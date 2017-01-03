@@ -303,7 +303,7 @@ class FuncEventTraceParser(object):
             if not threads.has_key(tid):
                 sequence=sequence+1
                 threads[tid] = sequence
-            new_file='%d_%s_%s__' % (threads[tid],tid,self.src_file)
+            new_file='%s__%d_%s' % (self.src_file,threads[tid],tid)
             self.file_list[new_file] = ''
             with open(new_file, 'a') as n:
                 n.write(line)
@@ -412,6 +412,8 @@ class OIDEventParser(object):
             event.event = dtag
             event._ts = bts
             self.add_oid_ts(event)
+          elif event._eventname == 'eventtrace:oid_elapsed':
+            self.add_tag_counter(event)
 
   def compute_perf_counter_latency(self):
       # aggregate oid performance for derived perf counters
@@ -561,7 +563,7 @@ class FuncEventCephLogParser(object):
           if not threads.has_key(tid):
             sequence=sequence+1
             threads[tid] = sequence
-          new_file='%d.%s.%s' % (threads[tid], self.log_file, tid)
+          new_file='%s.%d.%s' % (self.log_file, threads[tid], tid)
           self.file_list[new_file] = ''
           with open(new_file, 'a') as n:
             n.write(line)
