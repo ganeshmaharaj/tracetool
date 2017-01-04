@@ -45,6 +45,7 @@ import getopt
 import string
 import yaml
 import threading
+from parse import *
 
 
 """
@@ -89,8 +90,6 @@ class Util(object):
 
     d3 = ((d2-d1).total_seconds())*1000000
     return d3
-
-  
 
 """
 FuncStack provides abstraction for call stack as well as ordered tree traversal
@@ -207,45 +206,49 @@ class EventParser(object):
   def __init__(self, event_str):
     self.event_str = event_str
     self.attrs = dict()
-    self.parse()
-    if (self.attrs['_eventname'] == 'eventtrace:oid_event' or
-        self.attrs['_eventname'] == 'eventtrace:oid_elapsed'):
-      self.add_trimmed_context()
+    base_fmt='[{ts}]{}eventtrace:{id}: { cpu_id = {cpu_id} }, { pthread_id = {pthread_id}, ' \
+      'vpid = {vpid}, procname = "{procname}" }, '
+    self.enter_fmt = base_fmt + '{ file = "{file}", func = "{func}", line = {line} }'
+    self.exit_fmt = base_fmt + '{ file = "{file}", func = "{func}" }'
+    self.oid_fmt = base_fmt + '{ oid = {oid}, event = {event}, ' \
+          'context = {context}, file = "{file}", func = {func}, line = {line} }'
+    self.elapsed_fmt = base_fmt + '{ oid = {oid}, event = {event}, ' \
+          'context = {context}, elapsed = {elapsed}, file = "{file}", func = "{func}", line = {line} }'
 
-  def parse_section(self, str):
-    entries = str.split(", ")
-    for entry in entries:
-      entry = entry.strip()
-      r = re.match('(.*) = (.*)', entry)
-      if r:
-          k = r.group(1).strip('"')
-          v = r.group(2).strip('"')
-          self.attrs[k] = v
+  def parse_short(self):
+    res = parse('{}eventtrace:{id}: { cpu_id ={}pthread_id = {pthread_id}, vpid = {vpid}, procname {}', self.event_str)
+    if res:
+      self.attrs.update(res.named)
+    return res
 
   def parse(self):
-    section = self.event_str.split(": ")
+    # get event and do the parsing based on event type
+    res = parse('{}eventtrace:{id}: { cpu_id{}', self.event_str)
 
-    # header will have [timestamp] (elasped) node event:count
-    header = section[0].split()
-    if header and len(header) != 4:
-      raise ParseError("Header '%s' parse error (need 4 tokens, found: %d instead in line '%s'"  %
-          (header, len(header), self.event_str))
-    else:
-      #self.attrs['_ts'] = header[0].strip("[]")
-      self.attrs['_ts'] = dateutil.parser.parse(header[0].strip("[]"))
-      self.attrs['_elapsed'] = header[1].strip("()")
-      self.attrs['_host'] = header[2]
-      self.attrs['_eventname'] = header[3]
+    if res:
+      self.attrs.update(res.named)
+      if self.attrs['id'] == 'func_enter':
+        res = parse(self.enter_fmt, self.event_str)
+      elif self.attrs['id'] == 'func_exit':
+        res = parse(self.exit_fmt, self.event_str)
+      elif self.attrs['id'] == 'oid_event':
+        res = parse(self.oid_fmt, self.event_str)
+      elif self.attrs['id'] == 'oid_elapsed':
+        res = parse(self.elapsed_fmt, self.event_str)
+      else:
+        return None
+      if res:
+        self.attrs.update(res.named)
+        if self.attrs['id'] == 'oid_event' or self.attrs['id'] == 'oid_elapsed':
+          self.add_trimmed_context()
+        self.attrs['ts'] = dateutil.parser.parse(self.attrs['ts'])
+        if self.attrs.get('elapsed'):
+          self.attrs['elapsed'] = float(self.attrs['elapsed'])
+        for attr in ['oid', 'event', 'context']:
+          if self.attrs.get(attr):
+            self.attrs[attr] = self.attrs[attr].replace('"', '')
 
-    # add log entries
-    r = re.compile('{ (.*?) }')
-    context = r.findall(section[1])
-    for entry in context:
-      entry = entry.strip()
-      self.parse_section(entry)
-
-    if self.attrs.get('elapsed'):
-      self.attrs['elapsed'] = float(self.attrs['elapsed'])
+    return res
 
   def add_trimmed_context(self):
       e2 = self.attrs['context'].split('!')
@@ -288,30 +291,31 @@ class FuncEventTraceParser(object):
     with open(file, 'r') as f:
       for line in f:
         event = EventParser(line)
-        if event._eventname == 'eventtrace:func_enter':
-          node = FuncStack(parent, level, event.func, event.file, event.line)
-          node.add_enter_ts(event._ts)
-          if level == 0:
-            root = node
-          else:
-            parent.insert(node)
-          parent = node
-          stack.append(node)
-          level += 1
-        elif event._eventname == 'eventtrace:func_exit':
-          if level == 0: # means out of line marker, ignore
-              continue
-          level -= 1
-          node = stack.pop()
-          node.add_exit_ts(event._ts)
-          parent = node.parent
+        if event.parse():
+          if event.id == 'func_enter':
+            node = FuncStack(parent, level, event.func, event.file, event.line)
+            node.add_enter_ts(event.ts)
+            if level == 0:
+              root = node
+            else:
+              parent.insert(node)
+            parent = node
+            stack.append(node)
+            level += 1
+          elif event.id == 'func_exit':
+            if level == 0: # means out of line marker, ignore
+                continue
+            level -= 1
+            node = stack.pop()
+            node.add_exit_ts(event.ts)
+            parent = node.parent
 
-          if level == 0:
-            root.trim()
-            self.add_stack(stacks, root)
-            root=None
-            parent=None
-            stack=list()
+            if level == 0:
+              root.trim()
+              self.add_stack(stacks, root)
+              root=None
+              parent=None
+              stack=list()
 
     # this may need to be locked to be multi-threaded safe
     self.stacks_per_tid_file[file] = stacks
@@ -327,8 +331,7 @@ class FuncEventTraceParser(object):
     with open(self.src_file, 'r') as f:
       for line in f:
         event = EventParser(line)
-        if event.pthread_id and (event._eventname == 'eventtrace:func_enter' or 
-           event._eventname == 'eventtrace:func_exit'):
+        if event.parse_short() and (event.id == 'func_enter' or event.id == 'func_exit'):
             tid =  event.pthread_id
             if not threads.has_key(tid):
                 sequence=sequence+1
@@ -374,6 +377,7 @@ class FuncEventTraceParser(object):
     # write each stack to file
     for stack in stacks:
       stack.dump_stats(sfd, self.detail_stats)
+
 
 """
 Parse oid trace events
@@ -439,7 +443,7 @@ class OIDEventParser(object):
         # key is like RADOS_OP_COMPLETE!0 or OP_APPLIED_BEGIN!1
         if not self.oid_ts[key].get(noid):
           self.oid_ts[key][noid] = list()
-        self.oid_ts[key][noid].append(event._ts)
+        self.oid_ts[key][noid].append(event.ts)
     else:
       pass
       
@@ -453,18 +457,17 @@ class OIDEventParser(object):
       #          benchmark_data_reddy1_26045_object0!26045: (14:11:07.638468674) 
       for line in f:
         event = EventParser(line)
-        if (event._eventname == 'eventtrace:oid_event' or 
-          event._eventname == 'eventtrace:oid_elapsed'):
+        if event.parse() and (event.id == 'oid_event' or event.id == 'oid_elapsed'):
           tag = event.event
           self.add_oid_ts(event)
           if tag in self.config['derived_oids']: 
             self.add_tag_counter(event)
             dtag = self.config['derived_oids'][tag]
-            bts = event._ts - timedelta(microseconds=event.elapsed)
+            bts = event.ts - timedelta(microseconds=event.elapsed)
             event.event = dtag
-            event._ts = bts
+            event.ts = bts
             self.add_oid_ts(event)
-          elif event._eventname == 'eventtrace:oid_elapsed':
+          elif event.id == 'oid_elapsed':
             self.add_tag_counter(event)
 
   @timefunc
