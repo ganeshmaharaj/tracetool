@@ -44,7 +44,33 @@ import numpy as np
 import getopt
 import string
 import yaml
+import threading
 
+
+"""
+Profile function execution time
+"""
+def timefunc(func):
+  def func_wrapper(*args, **kwargs):
+    b = datetime.datetime.now()
+    ret = func(*args, **kwargs)
+    e = datetime.datetime.now()
+    secs = (e-b).total_seconds()
+    print("%s took [%dm:%ds]" % (func.__name__, secs/60, secs%60))
+    return ret
+  return func_wrapper
+
+"""
+Wrapper for calling object function method
+"""
+class FuncThread(threading.Thread):
+  def __init__(self, method, *args):
+    self._method = method
+    self._args = args
+    threading.Thread.__init__(self)
+
+  def run(self):
+    self._method(*self._args)
 
 """
 Common functions
@@ -239,10 +265,17 @@ Parse function trace events
 class FuncEventTraceParser(object):
   def __init__(self, file, detail_stats = 0):
     self.src_file = file
-    self.stacks = list()
+    self.stacks_per_tid_file = dict()
     self.detail_stats = detail_stats 
     self.long_hdr = "state:function:file:line,count,avg(usecs),med(usecs),90(usecs),95(usecs),99(usecs),std(usecs),var(usecs)\n"
     self.short_hdr = "state:function:file:line,count,avg(usecs)\n"
+
+  def add_stack(self, stacks, s):
+    for n in stacks:
+      if n == s:
+        n.merge(s)
+        return
+    stacks.append(s)
 
   def parse_thread_trace_file(self, file):
     print("computing stats for file '%s'" % (file))
@@ -251,6 +284,7 @@ class FuncEventTraceParser(object):
     root=None
     parent=None
     stack = list()
+    stacks = list()
     with open(file, 'r') as f:
       for line in f:
         event = EventParser(line)
@@ -274,22 +308,18 @@ class FuncEventTraceParser(object):
 
           if level == 0:
             root.trim()
-            matched_node = None
-            for n in self.stacks:
-              if n == root:
-                matched_node = n
-                break
-            if matched_node:
-              matched_node.merge(root)
-            else:
-              self.stacks.append(root) 
+            self.add_stack(stacks, root)
             root=None
             parent=None
             stack=list()
+
+    # this may need to be locked to be multi-threaded safe
+    self.stacks_per_tid_file[file] = stacks
                     
   """
   create separate files for each thread - maintain sequence based on what is observed in source file
   """
+  @timefunc
   def split_file_by_tid(self):
     threads={}
     sequence=0
@@ -308,20 +338,41 @@ class FuncEventTraceParser(object):
             with open(new_file, 'a') as n:
                 n.write(line)
 
+  @timefunc
   def extract_per_thread_stack(self):
     # for each file, do the indent
+    threads = []
     for temp_file in self.file_list.keys():
-      self.parse_thread_trace_file(temp_file)
+      thr = FuncThread(self.parse_thread_trace_file, temp_file)
+      thr.start()
+      threads.append(thr)
+    
+    # wait for all threads to complete
+    for t in threads:
+      t.join()
+
+    # remove temp files
+    for temp_file in self.file_list.keys():
       os.remove(temp_file)
 
   def dump_stacks(self):
     stack_file="%s.perf.csv" % self.src_file
     sfd = open(stack_file, 'w')
+    stacks = list()
+    
+    # create unique stacks
+    for file in self.stacks_per_tid_file:
+      for s in self.stacks_per_tid_file[file]:
+        self.add_stack(stacks, s)
+    
+    # write header to file
     if self.detail_stats:
       sfd.write(self.long_hdr)
     else:
       sfd.write(self.short_hdr)
-    for stack in self.stacks:
+
+    # write each stack to file
+    for stack in stacks:
       stack.dump_stats(sfd, self.detail_stats)
 
 """
@@ -392,6 +443,7 @@ class OIDEventParser(object):
     else:
       pass
       
+  @timefunc
   def parse_file(self):
     with open(self.src_file, 'r') as f:
       # oid_ts will have 
@@ -415,6 +467,7 @@ class OIDEventParser(object):
           elif event._eventname == 'eventtrace:oid_elapsed':
             self.add_tag_counter(event)
 
+  @timefunc
   def compute_perf_counter_latency(self):
       # aggregate oid performance for derived perf counters
       # we will use the tag_perf for ease of use
@@ -440,6 +493,7 @@ class OIDEventParser(object):
         else:
             pass
 
+  @timefunc
   def compute_and_dump_stats(self):
     # compute summary stats and write to file
     oid_stat_file="%s.oidperf.csv" % self.src_file
