@@ -9,8 +9,7 @@ Scripts use following LTTng trace events for latency analysis:
 PRE-REQUISITES
 --------------
 
-1. You will need the following pull request that has support for above event traces for key functions:
-   https://github.com/ceph/ceph/pull/12330
+1. Ceph master branch from https://github.com/ceph/ceph.git
 
 2. By default, above events are not enabled with LTTng tracing due to concerns over performance implications.
    So you will need to build Ceph with -DWITH_LTTNG=ON -DWITH_EVENTTRACE=ON 
