@@ -46,6 +46,7 @@ import string
 from parse_utils import FuncEventTraceParser
 from parse_utils import OIDEventParser
 from parse_utils import FuncEventCephLogParser
+from parse_utils import BabelTraceParser
 
 def print_usage(name):
   print("Usage %s -t <func|oid|log> [-d <for detailed stats>] <files - trace or ceph log> " % name)
@@ -53,8 +54,9 @@ def print_usage(name):
 def main(name, argv):
   detailed_stats=0
   parse_type=None
+  out_file=None
   try:
-    opts, args = getopt.getopt(argv,"t:d")
+    opts, args = getopt.getopt(argv,"t:o:d")
   except getopt.GetoptError:
     print_usage(name)
     sys.exit(2)
@@ -63,8 +65,10 @@ def main(name, argv):
       detailed_stats = 1
     elif opt == '-t':
       parse_type = val
+    elif opt == '-o':
+      out_file = val
           
-  if not parse_type:
+  if not parse_type or (parse_type == 'babel_func' and not out_file):
     print_usage(name)
     sys.exit(1)
 
@@ -87,6 +91,10 @@ def main(name, argv):
       parser.split_file()
       parser.extract_stack_by_thread()
       parser.dump_unique_stacks()
+    elif parse_type == 'babel_func':
+      parser = BabelTraceParser(file, out_file)
+      parser.parse_and_compute_latency()
+
 
 if __name__ == "__main__":
   main(sys.argv[0], sys.argv[1:])

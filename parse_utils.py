@@ -46,6 +46,12 @@ import string
 import yaml
 import threading
 from parse import *
+from sys import stdout
+try:
+  from queue import Queue
+  import babeltrace
+except:
+  from Queue import Queue
 
 
 """
@@ -79,17 +85,15 @@ Common functions
 class Util(object):
   @staticmethod
   def get_usecs_elapsed(b_ts, e_ts):
-    if isinstance(b_ts, str):
+    if isinstance(b_ts, str) and isinstance(e_ts, str):
       d1 = dateutil.parser.parse(b_ts)
-    else:
-      d1 = b_ts
-    if isinstance(e_ts, str):
       d2 = dateutil.parser.parse(e_ts)
-    else:
-      d2 = e_ts
-
-    d3 = ((d2-d1).total_seconds())*1000000
-    return d3
+      return ((d2-d1).total_seconds())*1000000
+    elif ((isinstance(b_ts, int) or isinstance(b_ts, float)) and 
+          (isinstance(e_ts, int) or isinstance(e_ts, float))): #nanoseconds since Epoch   
+      return (e_ts-b_ts)/1000
+    else: 
+      return ((e_ts-b_ts).total_seconds())*1000000
 
 """
 FuncStack provides abstraction for call stack as well as ordered tree traversal
@@ -160,7 +164,7 @@ class FuncStack(object):
   def __eq__(self, right):
     if self.level == right.level and self.func == right.func and self.file == right.file:
       if len(self.children) == len(right.children):
-        for i in xrange(len(self.children)):
+        for i in range(len(self.children)):
           if self.children[i] == right.children[i]:
             continue
           else:
@@ -174,7 +178,7 @@ class FuncStack(object):
   def merge(self, y):
     self.ts.extend(y.ts)
     y.ts = list()
-    for i in xrange(len(self.children)):
+    for i in range(len(self.children)):
       self.children[i].merge(y.children[i])
     y.children = list()
 
@@ -184,8 +188,8 @@ class FuncStack(object):
     for nl in nlfnodes:
       nl.trim()
 
-    for x in xrange(len(self.children)):
-      for y in xrange(x+1, len(self.children)):
+    for x in range(len(self.children)):
+      for y in range(x+1, len(self.children)):
         n1 = self.children[x]
         n2 = self.children[y]
         if n1 == n2:
@@ -435,7 +439,7 @@ class OIDEventParser(object):
   def add_oid_ts(self, event):
     tag = event.event
     if tag in self.oid_tags:
-      for i in xrange(len(self.oid_tags[tag])):
+      for i in range(len(self.oid_tags[tag])):
         noid = self.oid_tags[tag][i].format(**event.attrs)
         key = "%s!%d" % (tag, i)
         if not self.oid_ts.get(key):
@@ -486,7 +490,7 @@ class OIDEventParser(object):
               if len(edict[k]) == len(sdict[k]):
                 if not self.tag_perf.get(ctr):
                   self.tag_perf[ctr] = list()
-                for i in xrange(len(edict[k])):
+                for i in range(len(edict[k])):
                   self.tag_perf[ctr].append(Util.get_usecs_elapsed(sdict[k][i], edict[k][i]))
               else:
                   print("parse error k=%s length mismatch in edict:%s, sdict:%s" % (k, edict, sdict))
@@ -639,3 +643,287 @@ class FuncEventCephLogParser(object):
     for k in self.stacks:
       for e in k:
         sfd.write("%s\n" % e)
+
+"""
+Parse function trace events
+"""
+class FuncEventData(object):
+  def __init__(self, event):
+    self.id = event.name
+    self.ts = event.timestamp
+    self.func = event.field_with_scope('func', babeltrace.common.CTFScope.EVENT_FIELDS)
+    self.file = event.field_with_scope('file', babeltrace.common.CTFScope.EVENT_FIELDS)
+    self.line = event.field_with_scope('line', babeltrace.common.CTFScope.EVENT_FIELDS)
+
+class OIDEventData(object):
+  def __init__(self, event):
+    self.id = event.name
+    self.vpid = event['vpid']
+    self.pthread_id = event['pthread_id']
+    self.procname = event['procname']
+    self.cpu_id = event['cpu_id']
+    self.ts = event.timestamp
+    self.func = event.field_with_scope('func', babeltrace.common.CTFScope.EVENT_FIELDS)
+    self.file = event.field_with_scope('file', babeltrace.common.CTFScope.EVENT_FIELDS)
+    self.line = event.field_with_scope('line', babeltrace.common.CTFScope.EVENT_FIELDS)
+    self.oid = event.field_with_scope('oid', babeltrace.common.CTFScope.EVENT_FIELDS)
+    self.event = event.field_with_scope('event', babeltrace.common.CTFScope.EVENT_FIELDS)
+    self.context = event.field_with_scope('context', babeltrace.common.CTFScope.EVENT_FIELDS)
+    self.elapsed = event.field_with_scope('elapsed', babeltrace.common.CTFScope.EVENT_FIELDS)
+    e2 = self.context.split('!')
+    if len(e2) == 5:
+        self.trimmed_context = "%s!%s!%s!%s" % (e2[0], e2[1].split(':')[0], e2[2], e2[4])
+
+class FuncEventStackBuilder(threading.Thread):
+
+  def __init__(self, event_q = None):
+    self.event_q = event_q
+    self.stacks = list()
+    self.long_hdr = "state:function:file:line,count,avg(usecs),med(usecs),90(usecs),95(usecs),99(usecs),std(usecs),var(usecs)\n"
+    self.short_hdr = "state:function:file:line,count,avg(usecs)\n"
+    threading.Thread.__init__(self)
+
+  def add_stack(self, s):
+    for n in self.stacks:
+      if n == s:
+        n.merge(s)
+        return
+    self.stacks.append(s)
+
+  @timefunc
+  def run(self):
+    level=0
+    root=None
+    parent=None
+    stack = list()
+    while True:
+      el = self.event_q.get()
+      if el is None:
+        break
+      if el.id == 'eventtrace:func_enter':
+        node = FuncStack(parent, level, el.func, el.file, el.line)
+        node.add_enter_ts(el.ts)
+        if level == 0:
+          root = node
+        else:
+          parent.insert(node)
+        parent = node
+        stack.append(node)
+        level += 1
+      elif el.id == 'eventtrace:func_exit':
+        if level == 0: # means out of line marker, ignore
+            continue
+        level -= 1
+        node = stack.pop()
+        node.add_exit_ts(el.ts)
+        parent = node.parent
+
+        if level == 0:
+          root.trim()
+          self.add_stack(root)
+          root=None
+          parent=None
+          stack=list()
+
+  def dump(self, out_file, detail_stats = 0):
+    # write uniquue stack traces and latency into output file
+    sfd = open(out_file, 'w')
+    # write header to file
+    if detail_stats:
+      sfd.write(self.long_hdr)
+    else:
+      sfd.write(self.short_hdr)
+
+    # write each stack to file
+    for stack in self.stacks:
+      stack.dump_stats(sfd, detail_stats)
+
+    sfd.close()
+    
+"""
+Parse oid trace events
+"""
+class OIDEventBuilder(threading.Thread):
+  def __init__(self, event_q, counter_file = "counters.yaml"):
+    self.event_q = event_q
+    self.long_hdr = "counter,count,avg(usecs),med(usecs),90(usecs),95(usecs),99(usecs),std(usecs),var(usecs)\n"
+    self.short_hdr = "counter,count,avg(usecs)\n"
+    self.tag_perf = dict()
+    self.oid_ts = dict()
+
+    fd = open(counter_file)
+    self.config = yaml.safe_load(fd)
+    fd.close()
+    if not self.config.get('derived_oids'):
+      self.config['derived_oids'] = {}
+    if not self.config.get('perf_counters'):
+      print("'perf_counters' is empty in %s yaml file, aborting.." % (counter_file))
+      sys.exit(2) 
+
+    # this logic is bit tricky, forms two dictionaries out of self.ref_perf_counters
+    # self.oid_tags contains tag and list of variations that need to be built with event attributes
+    #   self.oid_tags={
+    #     'RADOS_OP_COMPLETE': ['{oid}!{context}!{vpid}'],
+    #     'RADOS_WRITE_OP_BEGIN': ['{oid}!{context}!{vpid}']
+    #   }
+    # self.perf_counters contains essentially counters and with begining and end tags with index id
+    #   self.perf_counters ={
+    #     'rados_write_e2e': ['RADOS_OP_COMPLETE!0', 'RADOS_WRITE_OP_BEGIN!0']
+    #   }
+    self.oid_tags = {}
+    self.perf_counters = {}
+    for c,v in self.config['perf_counters'].items():
+      self.perf_counters[c] = list()
+      if not v.get('key') or not v.get('begin') or not v.get('end'):
+        print("[key,begin,end] attrbutes are mandatory for %s, aborting.." % (c))
+        sys.exit(2)
+      key = v.get('key')
+      for tag in [v['begin'], v['end']]: 
+        # e.g., k = 'RADOS_OP_COMPLETE:{oid}!{context}!{vpid}', tag = RADOS_OP_COMPLETE, key = {oid}!{context}!{vpid}
+        if not self.oid_tags.get(tag):
+          self.oid_tags[tag] = [key]
+        else:
+          self.oid_tags[tag].append(key)
+        self.perf_counters[c].append("%s!%d" % (tag, self.oid_tags[tag].index(key))) 
+
+    threading.Thread.__init__(self)
+       
+  def add_tag_counter(self, event):
+    tag = event.event
+    if not self.tag_perf.get(tag):
+      self.tag_perf[tag] = list()
+    self.tag_perf[tag].append(event.elapsed)
+
+  def add_oid_ts(self, event):
+    tag = event.event
+    if tag in self.oid_tags:
+      for i in range(len(self.oid_tags[tag])):
+        noid = self.oid_tags[tag][i].format(**event.__dict__)
+        key = "%s!%d" % (tag, i)
+        if not self.oid_ts.get(key):
+          self.oid_ts[key] = dict()
+        # key is like RADOS_OP_COMPLETE!0 or OP_APPLIED_BEGIN!1
+        if not self.oid_ts[key].get(noid):
+          self.oid_ts[key][noid] = list()
+        self.oid_ts[key][noid].append(event.ts)
+    else:
+      pass
+      
+  @timefunc
+  def run(self):
+    while True:
+      # oid_ts will have 
+      #   tag![#]: dict (oid, list (__ts))
+      # example:
+      #   RADOS_READ_OP_BEGIN!0: 
+      #          benchmark_data_reddy1_26045_object0!26045: (14:11:07.638468674) 
+      event = self.event_q.get()
+      if event is None:
+        break
+      tag = event.event
+      self.add_oid_ts(event)
+      if tag in self.config['derived_oids']: 
+        self.add_tag_counter(event)
+        dtag = self.config['derived_oids'][tag]
+        bts = event.ts - event.elapsed*1000
+        event.event = dtag
+        event.ts = bts
+        self.add_oid_ts(event)
+      elif event.id == 'eventtrace:oid_elapsed':
+        self.add_tag_counter(event)
+
+    # aggregate oid performance for derived perf counters
+    # we will use the tag_perf for ease of use
+    # dump dict
+    for ctr in self.perf_counters:
+      ekey = self.perf_counters[ctr][0]
+      bkey = self.perf_counters[ctr][1]
+      if bkey in self.oid_ts and ekey in self.oid_ts:
+        edict = self.oid_ts[ekey]
+        sdict = self.oid_ts[bkey]
+        for k in edict:
+          if k in sdict:
+            if len(edict[k]) == len(sdict[k]):
+              if not self.tag_perf.get(ctr):
+                self.tag_perf[ctr] = list()
+              for i in range(len(edict[k])):
+                self.tag_perf[ctr].append(Util.get_usecs_elapsed(sdict[k][i], edict[k][i]))
+            else:
+                print("parse error k=%s length mismatch in edict:%s, sdict:%s" % (k, edict, sdict))
+                continue
+          else:
+              print("key %s not found" % (k))
+      else:
+          pass
+
+  def dump(self, out_file, detail_stats = 0):
+    # compute summary stats and write to file
+    fd = open(out_file, 'w')
+    if detail_stats:
+      fd.write(self.long_hdr)
+    else:
+      fd.write(self.short_hdr)
+    for ctr in sorted(self.tag_perf):
+      a = np.array(self.tag_perf.get(ctr))
+      if detail_stats:
+        fd.write("%s,%s,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n" % (ctr, a.size, np.average(a), np.median(a),
+                  np.percentile(a, 90), np.percentile(a, 95), np.percentile(a, 99), np.std(a), np.var(a)))
+      else:
+        fd.write("%s,%s,%.2f\n" % (ctr, a.size, np.average(a)))
+
+class BabelTraceParser(object):
+  def __init__(self, trc_path, out_file, detail_stats = 0):
+    self.trc_path = trc_path
+    self.out_file = out_file
+
+  @timefunc
+  def parse_and_compute_latency(self):
+    tc = babeltrace.reader.TraceCollection()
+    tc.add_trace(self.trc_path, 'ctf')
+    # each entry contains a list of <thread : FuncThread>, <event queue : Queue>
+    func_threads={}
+    oid_event_q = Queue()
+    oid_thr = OIDEventBuilder(oid_event_q)
+    oid_thr.start()
+    #no_events=0
+    print("Processing started - takes several minutes to complete, be patient..")
+    for event in tc.events:
+      #no_events = no_events+1
+      #stdout.write("\rprocessed %d events" % no_events)
+      #stdout.flush()
+      if event.name == 'eventtrace:func_enter' or event.name == 'eventtrace:func_exit':
+        id="%s_%s" % (event['vpid'], event['pthread_id'])
+        if not id in func_threads:
+          event_q = Queue()
+          thr = FuncEventStackBuilder(event_q)
+          thr.start()
+          func_threads[id] = [thr, event_q]
+        else:
+          event_q = func_threads[id][1]
+        el = FuncEventData(event)
+        event_q.put(el)
+      elif event.name == 'eventtrace:oid_event' or event.name == 'eventtrace:oid_elapsed':
+        el = OIDEventData(event)
+        oid_event_q.put(el)
+
+    print("Processing complete.")
+    # notify all threads that we do not have any more events
+    oid_event_q.put(None)
+    for id in func_threads:
+      func_threads[id][1].put(None)
+  
+    # wait for all threads to complete
+    # consolidate stacks from all threads
+    print("Wating for threads to complete work.")
+    fbuilder = FuncEventStackBuilder()
+    for id in func_threads:
+      func_threads[id][0].join()
+      for s in func_threads[id][0].stacks:
+        fbuilder.add_stack(s)
+    oid_thr.join()
+    
+    # write stack to output file
+    print("Writing Function Stack and latency stats to '%s'" % ("%s.perf.csv" % self.out_file))
+    fbuilder.dump("%s.perf.csv" % self.out_file)
+    print("Writing OID latency stats to '%s'" % ("%s.oidperf.csv" % self.out_file))
+    oid_thr.dump("%s.oidperf.csv" % self.out_file)
