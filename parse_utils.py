@@ -480,8 +480,8 @@ class OIDEventParser(object):
       # we will use the tag_perf for ease of use
       # dump dict
       for ctr in self.perf_counters:
-        ekey = self.perf_counters[ctr][0]
-        bkey = self.perf_counters[ctr][1]
+        bkey = self.perf_counters[ctr][0]
+        ekey = self.perf_counters[ctr][1]
         if bkey in self.oid_ts and ekey in self.oid_ts:
           edict = self.oid_ts[ekey]
           sdict = self.oid_ts[bkey]
@@ -690,7 +690,6 @@ class FuncEventStackBuilder(threading.Thread):
         return
     self.stacks.append(s)
 
-  @timefunc
   def run(self):
     level=0
     root=None
@@ -836,8 +835,8 @@ class OIDEventBuilder(threading.Thread):
     # we will use the tag_perf for ease of use
     # dump dict
     for ctr in self.perf_counters:
-      ekey = self.perf_counters[ctr][0]
-      bkey = self.perf_counters[ctr][1]
+      bkey = self.perf_counters[ctr][0]
+      ekey = self.perf_counters[ctr][1]
       if bkey in self.oid_ts and ekey in self.oid_ts:
         edict = self.oid_ts[ekey]
         sdict = self.oid_ts[bkey]
